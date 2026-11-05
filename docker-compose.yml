@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    container_name: oferta-central
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      TZ: America/Sao_Paulo
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      OLLAMA_URL: http://ollama:11434
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-model:
+        condition: service_completed_successfully
+  ollama:
+    image: ollama/ollama:latest
+    container_name: oferta-central-ollama
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+  ollama-model:
+    image: curlimages/curl:8.12.1
+    container_name: oferta-central-model-setup
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["curl -fsS http://ollama:11434/api/pull -H 'Content-Type: application/json' -d '{\"name\":\"llama3.2:1b\",\"stream\":false}' && echo Modelo llama3.2:1b pronto"]
+    restart: "no"
+volumes:
+  ollama-data:
