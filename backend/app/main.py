@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import base64
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -403,19 +406,36 @@ def ml_authorize(request: Request):
     with Session() as db: client_id=setting(db,"ml_client_id")
     if not client_id: raise HTTPException(400,"Salve o Client ID do aplicativo Mercado Livre primeiro.")
     redirect_uri=str(request.base_url).rstrip("/")+"/api/marketplace/mercadolivre/callback"
+    verifier=secrets.token_urlsafe(64)
+    state=secrets.token_urlsafe(32)
+    challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    with Session() as db:
+        for key,value in (("ml_oauth_pkce_verifier",verifier),("ml_oauth_state",state)):
+            row=db.get(Setting,key) or Setting(key=key); row.value=value; db.add(row)
+        db.commit()
     from urllib.parse import urlencode
-    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"scope":"read offline_access"}))
+    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"scope":"read offline_access","state":state,"code_challenge":challenge,"code_challenge_method":"S256"}))
 
 @app.get("/api/marketplace/mercadolivre/callback")
-async def ml_callback(code: str, request: Request):
+async def ml_callback(code: str, state: str, request: Request):
     redirect_uri=str(request.base_url).rstrip("/")+"/api/marketplace/mercadolivre/callback"
     with Session() as db:
-        data={"grant_type":"authorization_code","client_id":setting(db,"ml_client_id"),"client_secret":setting(db,"ml_client_secret"),"code":code,"redirect_uri":redirect_uri}
+        expected_state=setting(db,"ml_oauth_state")
+        verifier=setting(db,"ml_oauth_pkce_verifier")
+        if not expected_state or not secrets.compare_digest(state,expected_state) or not verifier:
+            raise HTTPException(400,"A autorização expirou ou não corresponde à solicitação. Clique em Autorizar Mercado Livre e tente novamente.")
+        data={"grant_type":"authorization_code","client_id":setting(db,"ml_client_id"),"client_secret":setting(db,"ml_client_secret"),"code":code,"redirect_uri":redirect_uri,"code_verifier":verifier}
         async with httpx.AsyncClient(timeout=20) as client: response=await client.post("https://api.mercadolibre.com/oauth/token",data=data)
-        if response.is_error: raise HTTPException(400,"Mercado Livre recusou a autorização. Confira Client ID, secret e redirect URI.")
+        if response.is_error:
+            details=response.json() if response.headers.get("content-type","").startswith("application/json") else {}
+            reason=details.get("error_description") or details.get("message") or details.get("error")
+            raise HTTPException(400,f"Mercado Livre recusou a autorização: {reason or 'verifique permissões e dados do aplicativo'}.")
         result=response.json()
         values={"ml_access_token":result["access_token"],"ml_refresh_token":result.get("refresh_token",""),"ml_token_expires":str(datetime.now(timezone.utc).timestamp()+result.get("expires_in",21600)),"ml_connected":"true"}
         for key,value in values.items(): row=db.get(Setting,key) or Setting(key=key); row.value=value; db.add(row)
+        for key in ("ml_oauth_state","ml_oauth_pkce_verifier"):
+            row=db.get(Setting,key)
+            if row: db.delete(row)
         db.commit()
     return RedirectResponse("/")
 
