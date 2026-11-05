@@ -14,13 +14,18 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, select
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, inspect, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/affiliate.db")
-if DATABASE_URL.startswith("sqlite"):
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+if IS_SQLITE:
     os.makedirs("./data", exist_ok=True)
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if IS_SQLITE else {})
 Session = sessionmaker(bind=engine, expire_on_commit=False)
 
 class Base(DeclarativeBase): pass
@@ -64,7 +69,10 @@ class Schedule(Base):
 Base.metadata.create_all(engine)
 # Upgrade databases created by earlier versions without discarding saved offers.
 with engine.begin() as connection:
-    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(offers)").fetchall()}
+    if IS_SQLITE:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(offers)").fetchall()}
+    else:
+        columns = {column["name"] for column in inspect(connection).get_columns("offers")}
     if "marketplace" not in columns: connection.exec_driver_sql("ALTER TABLE offers ADD COLUMN marketplace VARCHAR(30) DEFAULT 'mercadolivre'")
     if "status" not in columns: connection.exec_driver_sql("ALTER TABLE offers ADD COLUMN status VARCHAR(30) DEFAULT 'pending'")
 app = FastAPI(title="Oferta Central API", version="1.0.0")
@@ -365,6 +373,13 @@ def get_settings():
     with Session() as db:
         keys = ["telegram_token", "telegram_chat_id", "telegram_group_url", "ai_provider", "ai_api_key", "ollama_url", "ml_affiliate_tag", "telegram_auto", "ai_prompt", "public_base_url", "discovery_terms", "ml_client_id", "ml_client_secret", "ml_connected"]
         result={k: setting(db, k, "false" if k == "telegram_auto" else "") for k in keys}
+        # Never return credentials or OAuth tokens from the public settings API.
+        for key in ("telegram_token", "ai_api_key", "ml_client_secret"):
+            result[key] = ""
+        result["telegram_token_configured"] = bool(setting(db, "telegram_token"))
+        result["ai_api_key_configured"] = bool(setting(db, "ai_api_key"))
+        result["ml_client_secret_configured"] = bool(setting(db, "ml_client_secret"))
+        result["database_type"] = "SQLite" if IS_SQLITE else "PostgreSQL"
         result["ai_prompt"] = result["ai_prompt"] or DEFAULT_COPY_PROMPT
         result["discovery_terms"] = result["discovery_terms"] or DEFAULT_DISCOVERY_TERMS
         return result
@@ -374,8 +389,11 @@ def put_setting(key: str, payload: SettingIn):
     allowed = {"telegram_token", "telegram_chat_id", "telegram_group_url", "ai_provider", "ai_api_key", "ollama_url", "ml_affiliate_tag", "telegram_auto", "ai_prompt", "public_base_url", "discovery_terms", "ml_client_id", "ml_client_secret"}
     if key not in allowed: raise HTTPException(400, "Configuração inválida")
     with Session() as db:
-        row = db.get(Setting, key) or Setting(key=key); row.value = payload.value; db.add(row); db.commit()
-    return {"key": key, "value": payload.value}
+        row = db.get(Setting, key)
+        if key in {"telegram_token", "ai_api_key", "ml_client_secret"} and not payload.value and row:
+            return {"key": key, "value": "", "configured": bool(row.value)}
+        row = row or Setting(key=key); row.value = payload.value; db.add(row); db.commit()
+    return {"key": key, "value": "" if key in {"telegram_token", "ai_api_key", "ml_client_secret"} else payload.value, "configured": bool(payload.value) if key in {"telegram_token", "ai_api_key", "ml_client_secret"} else None}
 
 @app.get("/api/marketplace/mercadolivre/authorize")
 def ml_authorize(request: Request):
@@ -383,7 +401,7 @@ def ml_authorize(request: Request):
     if not client_id: raise HTTPException(400,"Salve o Client ID do aplicativo Mercado Livre primeiro.")
     redirect_uri=str(request.base_url).rstrip("/")+"/api/marketplace/mercadolivre/callback"
     from urllib.parse import urlencode
-    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri}))
+    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"scope":"read offline_access"}))
 
 @app.get("/api/marketplace/mercadolivre/callback")
 async def ml_callback(code: str, request: Request):

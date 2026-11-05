@@ -51,3 +51,12 @@ start-windows.bat           Inicialização rápida no Windows
 ## Segurança e limites
 
 Esta configuração é para uso local confiável. Não exponha a porta à internet sem autenticação, HTTPS, proteção de segredos e controle de acesso. Tokens são guardados em texto no SQLite local. Os números de comissão são estimativas informadas no cadastro; a API do Mercado Livre não é consultada. Estatísticas e insight são calculados dos cliques recebidos, sem inferir dados não observados.
+
+## Banco de dados no Render
+
+O SQLite padrão funciona para execução local. No Render, o sistema de arquivos de um serviço web é temporário; sem persistência configurada, SQLite pode voltar vazio após reinício ou novo deploy. Para manter as configurações, ofertas e cliques:
+
+- **Postgres:** crie um banco no Render, copie a Internal Database URL e adicione ao serviço web como variável `DATABASE_URL`. O backend aceita URLs `postgres://` e `postgresql://` do Render.
+- **Disco persistente:** disponível em serviço compatível/plano pago, anexe um disco no caminho `/app/data`. O SQLite padrão passa a ficar dentro do disco.
+
+Depois faça um deploy e confira se o painel mantém uma configuração após reiniciar. A API não retorna os valores de segredos; o painel informa quando uma chave já foi salva, e deixar o campo secreto vazio preserva o valor salvo.
