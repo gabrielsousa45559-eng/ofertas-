@@ -117,6 +117,9 @@ class ScheduleIn(BaseModel): time: str; enabled: bool = True
 class AffiliateConvertIn(BaseModel): product_url: HttpUrl; title: str = "Link Mercado Livre"
 
 def setting(db, key, default=""):
+    env_key = {"ml_client_id": "ML_CLIENT_ID", "ml_client_secret": "ML_CLIENT_SECRET"}.get(key)
+    if env_key and os.getenv(env_key):
+        return os.getenv(env_key, "")
     row = db.get(Setting, key)
     return row.value if row else default
 

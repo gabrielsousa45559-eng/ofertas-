@@ -52,6 +52,10 @@ start-windows.bat           Inicialização rápida no Windows
 
 Esta configuração é para uso local confiável. Não exponha a porta à internet sem autenticação, HTTPS, proteção de segredos e controle de acesso. Tokens são guardados em texto no SQLite local. Os números de comissão são estimativas informadas no cadastro; a API do Mercado Livre não é consultada. Estatísticas e insight são calculados dos cliques recebidos, sem inferir dados não observados.
 
+## Credenciais do Mercado Livre no Render
+
+No serviço web do Render, cadastre as variáveis `ML_CLIENT_ID` e `ML_CLIENT_SECRET` com os valores do aplicativo no DevCenter. O backend usa essas variáveis prioritariamente, sem depender do SQLite temporário para iniciar a autorização. Localmente, os campos do painel continuam funcionando.
+
 ## Banco de dados no Render
 
 O SQLite padrão funciona para execução local. No Render, o sistema de arquivos de um serviço web é temporário; sem persistência configurada, SQLite pode voltar vazio após reinício ou novo deploy. Para manter as configurações, ofertas e cliques:
