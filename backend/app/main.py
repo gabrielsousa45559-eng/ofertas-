@@ -178,16 +178,41 @@ async def ml_access_token(db):
     return data["access_token"]
 
 async def discover_marketplace(query: str, limit: int = 8, category: str = "Geral"):
-    """Search Mercado Livre listings with the account-authorized official API."""
+    """Search the official product catalog, then resolve each result to a purchasable listing."""
     with Session() as db: token=await ml_access_token(db)
     async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.get("https://api.mercadolibre.com/sites/MLB/search", headers={"Authorization":f"Bearer {token}"}, params={"q": query, "limit": min(limit, 50), "sort": "relevance"})
-        if response.is_error: raise HTTPException(502, f"Busca Mercado Livre falhou ({response.status_code}).")
-        payload = response.json()
+        headers={"Authorization":f"Bearer {token}"}
+        response = await client.get("https://api.mercadolibre.com/products/search", headers=headers, params={"site_id":"MLB", "status":"active", "q":query, "limit":min(limit, 50), "offset":0})
+        if response.is_error: raise HTTPException(502, f"Busca de catálogo Mercado Livre falhou ({response.status_code}).")
+        catalog = response.json().get("results", [])
+        candidates=[]
+        for product in catalog:
+            product_id=product.get("id")
+            if not product_id: continue
+            offers_response=await client.get(f"https://api.mercadolibre.com/products/{product_id}/items", headers=headers)
+            if offers_response.is_error: continue
+            offers_payload=offers_response.json()
+            offers=offers_payload if isinstance(offers_payload,list) else offers_payload.get("results", offers_payload.get("items", []))
+            if not offers: continue
+            valid_offers=[offer for offer in offers if offer.get("item_id") and str(offer.get("currency_id") or "BRL")=="BRL" and offer.get("price") is not None]
+            valid_offers=sorted(valid_offers,key=lambda offer: float(offer["price"]))
+            for listing in valid_offers:
+                item_id=listing["item_id"]
+                item_response=await client.get(f"https://api.mercadolibre.com/items/{item_id}", headers=headers)
+                if item_response.is_error: continue
+                item=item_response.json()
+                url=item.get("permalink")
+                if not url: continue
+                # Preserve offer identity and price from /products/{id}/items; do not
+                # substitute catalog-page prices or a different seller's listing.
+                candidates.append({"title":product.get("name") or item.get("title") or "Produto Mercado Livre",
+                    "thumbnail":(product.get("pictures") or [{}])[0].get("url") or item.get("thumbnail") or "",
+                    "permalink":url,"price":listing.get("price"),"original_price":listing.get("original_price")})
+                break
     added, found = [], []
     with Session() as db:
         existing = {o.product_url for o in db.scalars(select(Offer)).all()}
-        for item in payload.get("results", []):
+        for item in candidates:
             url = item.get("permalink")
             if not url: continue
             found.append(item)
@@ -217,7 +242,7 @@ async def discover_marketplace(query: str, limit: int = 8, category: str = "Gera
                 except httpx.HTTPError: pass
                 if not offer.copy: offer.copy=safe_promotional_copy(offer.title,offer.price,offer.original_price)
         db.commit()
-    return {"query": query, "found": len(found), "added": len(added), "offers": added}
+    return {"query": query, "found": len(candidates), "added": len(added), "offers": added}
 
 async def scheduled_discovery():
     with Session() as db:
@@ -414,7 +439,7 @@ def ml_authorize(request: Request):
             row=db.get(Setting,key) or Setting(key=key); row.value=value; db.add(row)
         db.commit()
     from urllib.parse import urlencode
-    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"scope":"read offline_access","state":state,"code_challenge":challenge,"code_challenge_method":"S256"}))
+    return RedirectResponse("https://auth.mercadolivre.com.br/authorization?"+urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":state,"code_challenge":challenge,"code_challenge_method":"S256"}))
 
 @app.get("/api/marketplace/mercadolivre/callback")
 async def ml_callback(code: str, state: str, request: Request):
